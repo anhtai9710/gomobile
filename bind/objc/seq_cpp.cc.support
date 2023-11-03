@@ -1,0 +1,235 @@
+// Copyright 2016 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+#include "seq_cpp.hpp"
+#include <stdio.h>
+#include <stdint.h>
+#include <string.h>
+#include "seq.h"
+#include <iostream>
+#include <map>
+#include <vector>
+#include <mutex>
+#include <cstring>
+
+class RefCounter {
+public:
+  RefCounter() : _obj(nullptr), _cnt(0) {}
+  RefCounter(void *obj) : _obj(obj), _cnt(0) {}
+  void *getObject() const { return _obj; }
+  int getCount() const { return _cnt; }
+  void incCount() { _cnt++; }
+  void decCount() { _cnt--; }
+private:
+  void *_obj;
+  int _cnt;
+};
+
+class RefTracker {
+public:
+  RefTracker() : _next(42) {}
+  void dec(int32_t refnum) {
+    if (IS_FROM_GO(refnum)) {
+      LOG_FATAL("dec:invalid refnum for Objective-C objects");
+    }
+    std::lock_guard<std::mutex> lock(_mutex);
+    auto it = _objs.find(refnum);
+    if (it == _objs.end()) {
+      LOG_FATAL("unknown refnum");
+    }
+    int n = it->second.getCount();
+    if (n <= 0) {
+      LOG_FATAL("refcount underflow");
+    } else if (n == 1) {
+      LOG_DEBUG("remove the reference %d", refnum);
+      _refs.erase(it->second.getObject());
+      _objs.erase(it);
+    } else {
+      it->second.decCount();
+    }
+  }
+  void inc(int32_t refnum) {
+    if (IS_FROM_GO(refnum)) {
+      LOG_FATAL("dec:invalid refnum for Objective-C objects");
+    }
+    std::lock_guard<std::mutex> lock(_mutex);
+    auto it = _objs.find(refnum);
+    if (it == _objs.end()) {
+      LOG_FATAL("unknown refnum");
+    }
+    it->second.incCount();
+  }
+  void *get(int32_t refnum) {
+    if (IS_FROM_GO(refnum)) {
+      LOG_FATAL("get:invalid refnum for Objective-C objects");
+    }
+    std::lock_guard<std::mutex> lock(_mutex);
+    auto it = _objs.find(refnum);
+    if (it == _objs.end()) {
+      LOG_FATAL("unidentified object refnum: %d", refnum);
+    }
+    return it->second.getObject();
+  }
+  int32_t assignRefnumAndIncRefcount(void *obj) {
+    std::lock_guard<std::mutex> lock(_mutex);
+    auto it = _refs.find(obj);
+    if (it == _refs.end()) {
+      int32_t refnum = _next++;
+      _refs[obj] = refnum;
+      _objs[refnum] = RefCounter(obj);
+      _objs[refnum].incCount();
+      return refnum;
+    } else {
+      _objs[it->second].incCount();
+      return it->second;
+    }
+  }
+private:
+  int32_t _next;
+  std::map<void *, int32_t> _refs;
+  std::map<int32_t, RefCounter> _objs;
+  std::mutex _mutex;
+};
+
+RefTracker tracker;
+
+void *go_seq_objc_from_refnum(int32_t refnum) {
+  return tracker.get(refnum);
+}
+
+void *go_seq_release(void *obj, int32_t refnum) {
+  if (obj == nullptr) {
+    return nullptr;
+  }
+  if (refnum == NULL_REFNUM) {
+    return obj;
+  }
+  if (IS_FROM_GO(refnum)) {
+    return obj;
+  }
+  tracker.dec(refnum);
+  return obj;
+}
+
+GoSeqReference *go_seq_from_refnum(int32_t refnum) {
+  if (refnum == NULL_REFNUM) {
+    return nullptr;
+  }
+  if (IS_FROM_GO(refnum)) {
+    return new GoSeqReference(refnum, nullptr);
+  }
+  return new GoSeqReference(refnum, go_seq_objc_from_refnum(refnum));
+}
+
+int32_t go_seq_to_refnum(void *obj) {
+  if (obj == nullptr) {
+    return NULL_REFNUM;
+  }
+  return tracker.assignRefnumAndIncRefcount(obj);
+}
+
+int32_t go_seq_go_to_refnum(GoSeqReference *ref) {
+  int32_t refnum = ref->incNum();
+  if (!IS_FROM_GO(refnum)) {
+    LOG_FATAL("go_seq_go_to_refnum on objective-c objects is not permitted");
+  }
+  return refnum;
+}
+
+nbyteslice go_seq_from_objc_bytearray(std::vector<std::uint8_t> *data, int copy) {
+  nbyteslice res = {nullptr, 0};
+  u_long sz = data->size();
+  if (sz == 0) {
+    return res;
+  }
+  void *ptr;
+  // If the argument was not a NSMutableData, copy the data so that
+  // the NSData is not changed from Go. The corresponding free is called
+  // by releaseByteSlice.
+  if (copy) {
+    void *arr_copy = malloc(sz);
+    if (arr_copy == nullptr) {
+      LOG_FATAL("malloc failed");
+    }
+    memcpy(arr_copy, data, sz);
+    ptr = arr_copy;
+  } else {
+    ptr = data;
+  }
+  res.ptr = ptr;
+  res.len = sz;
+  return res;
+}
+
+std::vector<std::uint8_t> *go_seq_to_objc_bytearray(nbyteslice slice, int copy) {
+  // Check if the slice has valid data
+  if (slice.ptr == nullptr || slice.len == 0) {
+    return new std::vector<std::uint8_t>{}; // Return an empty vector
+  }
+
+  if (copy) {
+    // When copying data, create a new std::vector and copy the data from slice.
+    auto *vec = new std::vector<std::uint8_t>(slice.len);
+    std::memcpy(vec->data(), slice.ptr, slice.len);
+    return vec;
+  } else {
+    // When not copying, we assume the data in the slice can be used directly without copying.
+    // Be cautious with this option, as any changes to the vector data will affect the original data in the slice.
+    // This also means that you must ensure that the data outlives the vector to avoid undefined behavior.
+    // NOTE: This method does not deallocate the memory when the vector is destroyed. You have to manage it manually.
+    return new std::vector<std::uint8_t>(static_cast<std::uint8_t*>(slice.ptr), static_cast<std::uint8_t*>(slice.ptr) + slice.len);
+  }
+}
+
+nstring go_seq_from_objc_string(std::string s) {
+  /*nstring res = {NULL, 0};
+   int len = [s lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
+
+   if (len == 0) {
+   if (s.length > 0) {
+   LOG_INFO(@"unable to encode an NSString into UTF-8");
+   }
+   return res;
+   }
+
+   char *buf = (char *)malloc(len);
+   if (buf == NULL) {
+   LOG_FATAL(@"malloc failed");
+   }
+   NSUInteger used;
+   [s getBytes:buf
+   maxLength:len
+   usedLength:&used
+   encoding:NSUTF8StringEncoding
+   options:0
+   range:NSMakeRange(0, [s length])
+   remainingRange:NULL];
+   res.ptr = buf;
+   res.len = used;*/
+  char* cstr = new char[s.size() + 1];
+  // Copy characters from std::string to char array and add null-terminator
+  std::strcpy(cstr, s.c_str());
+  nstring res = {nullptr, 0};
+  res.ptr = cstr;
+  res.len = s.length();
+  return res;
+}
+
+std::string go_seq_to_objc_string(nstring str) {
+  if (str.len == 0) {  // empty string.
+    return std::string("");
+  }
+  std::string res = std::string((char *)str.ptr, str.len);
+  return res;
+}
+
+extern "C" {
+void go_seq_inc_ref(int32_t refnum) {
+  tracker.inc(refnum);
+}
+
+void go_seq_dec_ref(int32_t refnum) {
+  tracker.dec(refnum);
+}
+}

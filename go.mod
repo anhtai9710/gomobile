@@ -1,5 +1,11 @@
 module golang.org/x/mobile
 
+replace golang.org/x/mobile => /Users/subbotkin/projects/mobile
+
+replace golang.org/x/mobile/bind => /Users/subbotkin/projects/mobile/bind
+
+replace golang.org/x/mobile/bind/objc => /Users/subbotkin/projects/mobile/bind/objc
+
 go 1.18
 
 require (

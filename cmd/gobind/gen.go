@@ -139,17 +139,26 @@ func genPkg(lang string, p *types.Package, astFiles []*ast.File, allPkg []*types
 			Prefix:    *prefix,
 		}
 		g.Init(otypes)
-		w, closer := writer(filepath.Join("src", "gobind", pname+"_darwin.h"))
+		w, closer := writer(filepath.Join("src", "gobind", pname+".h"))
 		processErr(g.GenGoH())
 		io.Copy(w, &buf)
 		closer()
-		hname := strings.Title(fname[:len(fname)-2]) + ".objc.h"
-		w, closer = writer(filepath.Join("src", "gobind", hname))
+		baseName := ""
+		if strings.HasSuffix(fname, ".m") {
+			baseName = fname[:len(fname)-2]
+		} else if strings.HasSuffix(fname, ".cc") {
+			baseName = fname[:len(fname)-3]
+		} else {
+			baseName = fname[:len(fname)-2]
+		}
+
+		hname := strings.Title(baseName) + ".hpp"
+		w, closer = writer(filepath.Join("src", "cpp", hname))
 		processErr(g.GenH())
 		io.Copy(w, &buf)
 		closer()
-		mname := strings.Title(fname[:len(fname)-2]) + "_darwin.m"
-		w, closer = writer(filepath.Join("src", "gobind", mname))
+		mname := strings.Title(baseName) + ".cc"
+		w, closer = writer(filepath.Join("src", "cpp", mname))
 		conf.Writer = w
 		processErr(g.GenM())
 		io.Copy(w, &buf)
@@ -157,14 +166,18 @@ func genPkg(lang string, p *types.Package, astFiles []*ast.File, allPkg []*types
 		if p == nil {
 			// Copy support files
 			dir, err := packageDir("golang.org/x/mobile/bind/objc")
+			dir = "/Users/subbotkin/projects/mobile/bind/objc" // TODO(acme): remove this line
 			if err != nil {
 				errorf("unable to import bind/objc: %v", err)
 				return
 			}
-			copyFile(filepath.Join("src", "gobind", "seq_darwin.m"), filepath.Join(dir, "seq_darwin.m.support"))
-			copyFile(filepath.Join("src", "gobind", "seq_darwin.go"), filepath.Join(dir, "seq_darwin.go.support"))
+
+			copyFile(filepath.Join("src", "gobind", "seq_native.go"), filepath.Join(dir, "seq_cpp.go.support"))
 			copyFile(filepath.Join("src", "gobind", "ref.h"), filepath.Join(dir, "ref.h"))
-			copyFile(filepath.Join("src", "gobind", "seq_darwin.h"), filepath.Join(dir, "seq_darwin.h"))
+			copyFile(filepath.Join("src", "gobind", "seq.h"), filepath.Join(dir, "seq.h"))
+			copyFile(filepath.Join("src", "cpp", "seq_cpp.cc"), filepath.Join(dir, "seq_cpp.cc.support")) // TODO(acme): rename support files
+			copyFile(filepath.Join("src", "cpp", "seq.h"), filepath.Join(dir, "seq.h"))
+			copyFile(filepath.Join("src", "cpp", "seq_cpp.hpp"), filepath.Join(dir, "seq_cpp.h")) // TODO(acme): rename support files
 		}
 	default:
 		errorf("unknown target language: %q", lang)
@@ -176,9 +189,10 @@ func genPkgH(w io.Writer, pname string) {
 
 #ifdef __GOBIND_ANDROID__
 #include "%[1]s_android.h"
-#endif
-#ifdef __GOBIND_DARWIN__
+#elif __GOBIND_DARWIN__
 #include "%[1]s_darwin.h"
+#else
+#include "%[1]s_cpp.h"
 #endif`, pname)
 }
 
@@ -368,7 +382,7 @@ func defaultFileName(lang string, pkg *types.Package) string {
 		}
 		firstRune, size := utf8.DecodeRuneInString(pkg.Name())
 		className := string(unicode.ToUpper(firstRune)) + pkg.Name()[size:]
-		return *prefix + className + ".m"
+		return *prefix + className + ".cc"
 	}
 	errorf("unknown target language: %q", lang)
 	os.Exit(exitStatus)

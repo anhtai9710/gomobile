@@ -9,8 +9,8 @@ package main
 // bindings.
 
 /*
-#cgo CFLAGS: -x objective-c -fobjc-arc -fmodules -fblocks -Werror
-#cgo LDFLAGS: -framework Foundation
+#cgo darwin CFLAGS: -x objective-c -fobjc-arc -fmodules -fblocks -Werror
+#cgo darwin LDFLAGS: -framework Foundation
 
 #include <stdint.h>
 #include <stdlib.h>
