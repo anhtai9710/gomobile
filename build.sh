@@ -22,17 +22,19 @@ if [[ -z "$OUTPUT_DIR" ]]; then
   exit 1
 fi
 
-# Get full path to output directory
-OUTPUT_DIR="$(cd "$OUTPUT_DIR" && pwd)"
+# Get full path to output directory if it's relative
+if [[ "$OUTPUT_DIR" != /* ]]; then
+  OUTPUT_DIR="$(cd "$OUTPUT_DIR" && pwd)"
+fi
 
 echo "Building gomobile and gobind to $OUTPUT_DIR..."
 
 # Build gomobile
 cd "$WORKING_DIR"/cmd/gomobile || exit
-go build -o "$OUTPUT_DIR"
+go build -o "$OUTPUT_DIR"/gomobile
 
 # Build gobind
 cd "$WORKING_DIR"/cmd/gobind || exit
-go build -o "$OUTPUT_DIR"
+go build -o "$OUTPUT_DIR"/gobind
 
 echo "Done"
