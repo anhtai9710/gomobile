@@ -65,7 +65,7 @@ func platformOS(platform string) string {
 		// not GOOS=ios, since the underlying OS (and kernel, runtime) is macOS.
 		// We also apply a "macos" or "maccatalyst" build tag, respectively.
 		// See below for additional context.
-		return "darwin"
+		return "ios"
 	default:
 		panic(fmt.Sprintf("unexpected platform: %s", platform))
 	}
@@ -227,7 +227,7 @@ func envInit() (err error) {
 				// targets, there is also a "maccatalyst" tag.
 				// Some additional context on this can be found here:
 				// https://stackoverflow.com/questions/12132933/preprocessor-macro-for-os-x-targets/49560690#49560690
-				goos = "darwin"
+				goos = "ios"
 				sdk = "macosx"
 				clang, cflags, err = envClang(sdk)
 				// TODO(ydnar): the following 3 lines MAY be needed to compile
