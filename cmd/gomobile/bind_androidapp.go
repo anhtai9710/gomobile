@@ -51,6 +51,8 @@ func goAndroidBind(gobind string, pkgs []*packages.Package, targets []targetInfo
 		return err
 	}
 
+	replacePackageNameInJavaFiles(tmpdir, pkgs)
+
 	androidDir := filepath.Join(tmpdir, "android")
 
 	// Generate binding code and java source code only when processing the first package.
@@ -58,7 +60,7 @@ func goAndroidBind(gobind string, pkgs []*packages.Package, targets []targetInfo
 	for _, t := range targets {
 		t := t
 		wg.Go(func() error {
-			return buildAndroidSO(androidDir, t.arch)
+			return buildAndroidSO(androidDir, pkgs, t.arch)
 		})
 	}
 	if err := wg.Wait(); err != nil {
@@ -213,7 +215,7 @@ func buildAAR(srcDir, androidDir string, pkgs []*packages.Package, targets []tar
 
 	for _, t := range targets {
 		toolchain := ndk.Toolchain(t.arch)
-		lib := toolchain.abi + "/libgojni.so"
+		lib := toolchain.abi + "/libgojni_" + pkgs[0].Name + ".so"
 		w, err = aarwcreate("jni/" + lib)
 		if err != nil {
 			return err
@@ -349,7 +351,7 @@ func writeJar(w io.Writer, dir string) error {
 
 // buildAndroidSO generates an Android libgojni.so file to outputDir.
 // buildAndroidSO is concurrent-safe.
-func buildAndroidSO(outputDir string, arch string) error {
+func buildAndroidSO(outputDir string, pkgs []*packages.Package, arch string) error {
 	// Copy the environment variables to make this function concurrent-safe.
 	env := make([]string, len(androidEnv[arch]))
 	copy(env, androidEnv[arch])
@@ -386,15 +388,169 @@ func buildAndroidSO(outputDir string, arch string) error {
 		}
 	}
 
+	goJniName := "libgojni_" + pkgs[0].Name + ".so"
 	toolchain := ndk.Toolchain(arch)
 	if err := goBuildAt(
 		srcDir,
 		"./gobind",
 		env,
 		"-buildmode=c-shared",
-		"-o="+filepath.Join(outputDir, "src", "main", "jniLibs", toolchain.abi, "libgojni.so"),
+		"-o="+filepath.Join(outputDir, "src", "main", "jniLibs", toolchain.abi, goJniName),
 	); err != nil {
 		return err
+	}
+
+	return nil
+}
+
+func replacePackageNameInJavaFiles(tmpdir string, pkgs []*packages.Package) error {
+	javaFilesDir := filepath.Join(tmpdir, "java")
+	goPackageFilesDir := filepath.Join(javaFilesDir, "go")
+	goBindDir := filepath.Join(tmpdir, "src", "gobind")
+
+	// Create a new package name and directory
+	newGoPackageName := "go_" + pkgs[0].Name
+	newPackageDir := filepath.Join(javaFilesDir, newGoPackageName)
+	newJniLibName := "gojni_" + pkgs[0].Name
+	if err := os.MkdirAll(newPackageDir, 0755); err != nil {
+		return err
+	}
+
+	// Process all Java files in the "go" package
+	if err := processGoPackageFiles(goPackageFilesDir, newGoPackageName, newJniLibName, newPackageDir); err != nil {
+		return err
+	}
+
+	// Clean up old "go" package directory
+	if err := os.RemoveAll(goPackageFilesDir); err != nil {
+		return err
+	}
+
+	// Update imports in all other Java packages
+	if err := updateJavaPackageImports(javaFilesDir, newGoPackageName); err != nil {
+		return err
+	}
+
+	// Update the package name in the gobind directory
+	if err := processGobindDirectory(goBindDir, pkgs[0].Name); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func processGoPackageFiles(goPackageFilesDir, newGoPackageName, newJniLibName, newPackageDir string) error {
+	files, err := ioutil.ReadDir(goPackageFilesDir)
+	if err != nil {
+		return err
+	}
+
+	for _, file := range files {
+		if err := updateJavaFilePackage(
+			filepath.Join(goPackageFilesDir, file.Name()),
+			newGoPackageName,
+			newJniLibName,
+			newPackageDir,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func updateJavaFilePackage(filePath, newGoPackageName, newJniLibName, newPackageDir string) error {
+	fileContent, err := ioutil.ReadFile(filePath)
+	if err != nil {
+		return err
+	}
+
+	updatedContent := strings.Replace(string(fileContent), "package go;", "package "+newGoPackageName+";", 1)
+	updatedContent = strings.Replace(updatedContent, "import go.", "import "+newGoPackageName+".", -1)
+	updatedContent = strings.Replace(updatedContent, "\"gojni\"", "\""+newJniLibName+"\"", -1)
+
+	newFilePath := filepath.Join(newPackageDir, filepath.Base(filePath))
+	return ioutil.WriteFile(newFilePath, []byte(updatedContent), 0644)
+}
+
+func updateJavaPackageImports(javaFilesDir, newGoPackageName string) error {
+	javaPackages, err := ioutil.ReadDir(javaFilesDir)
+	if err != nil {
+		return err
+	}
+
+	for _, pkg := range javaPackages {
+		if pkg.Name() == newGoPackageName {
+			continue
+		}
+		if err := processJavaPackage(filepath.Join(javaFilesDir, pkg.Name()), newGoPackageName); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func processJavaPackage(packageDir, newGoPackageName string) error {
+	files, err := ioutil.ReadDir(packageDir)
+	if err != nil {
+		return err
+	}
+
+	for _, file := range files {
+		filePath := filepath.Join(packageDir, file.Name())
+		fileContent, err := ioutil.ReadFile(filePath)
+		if err != nil {
+			return err
+		}
+
+		updatedContent := strings.Replace(string(fileContent), "import go.", "import "+newGoPackageName+".", -1)
+		if err := ioutil.WriteFile(filePath, []byte(updatedContent), 0644); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func processGobindDirectory(gobindDir, pkgname string) error {
+	// Get a list of all files in the src/gobind directory
+	files, err := ioutil.ReadDir(gobindDir)
+	if err != nil {
+		return err
+	}
+
+	replacements := []struct {
+		oldStr string
+		newStr string
+	}{
+		{"Java_go", "Java_go_1" + pkgname},
+		{"go/", "go_" + pkgname + "/"},
+	}
+
+	for _, file := range files {
+		for _, replacement := range replacements {
+			// only in .c and .h files
+			if filepath.Ext(file.Name()) != ".c" && filepath.Ext(file.Name()) != ".h" {
+				continue
+			}
+			// Construct the full file path
+			filePath := filepath.Join(gobindDir, file.Name())
+
+			// Read the file content
+			fileContent, err := ioutil.ReadFile(filePath)
+			if err != nil {
+				return err
+			}
+
+			// Replace occurrences of the old string with the new string
+			updatedContent := strings.Replace(string(fileContent), replacement.oldStr, replacement.newStr, -1)
+
+			// Write the updated content back to the file
+			err = ioutil.WriteFile(filePath, []byte(updatedContent), 0644)
+			if err != nil {
+				return err
+			}
+		}
 	}
 
 	return nil

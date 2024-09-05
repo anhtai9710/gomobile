@@ -102,6 +102,8 @@ func runBind(cmd *command) error {
 		gobind, err = exec.LookPath("gobind")
 		if err != nil {
 			return errors.New("gobind was not found. Please run gomobile init before trying again")
+		} else {
+			fmt.Fprintf(os.Stderr, "found gobind: %s\n", gobind)
 		}
 	} else {
 		gobind = "gobind"
